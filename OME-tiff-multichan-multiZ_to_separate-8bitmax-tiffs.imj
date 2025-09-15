@@ -1,0 +1,194 @@
+// ImageJ/Fiji macro: OME-TIFF -> per-channel 8-bit Z-max projections (VERBOSE, FIXED v3)
+// Channels assumed fixed: C1=red, C2=green, C3=blue
+// Output names: M###_sSSS.tiff  (e.g., M149_s051.tiff)
+// Verbose console prints + % completion after each file. ASCII-only prints for parser compatibility.
+
+macro "OME-TIFF per-channel Z-max to 8-bit [F5]" {
+
+    // ------- user prompts -------
+    inDir  = getDirectory("Choose INPUT directory containing OME-TIFFs");
+    if (inDir=="") exit("No input directory selected.");
+    outDir = getDirectory("Choose OUTPUT directory (will create channel subfolders)");
+    if (outDir=="") exit("No output directory selected.");
+
+    // ------- options you can tweak -------
+    scaleConversions = true; // 16->8 bit scaling uses full range
+    makePerChannelDirs(outDir); // ensures C1/C2/C3 dirs exist
+
+    setOption("ScaleConversions", scaleConversions);
+
+    // ------- collect candidate files (OME-TIFF only) -------
+    all = getFileList(inDir);
+    files = newArray(); // will hold only valid OME-TIFFs
+    for (i=0; i<all.length; i++) {
+        p = inDir + all[i];
+        if (File.isDirectory(p)) continue;
+        nm = toLowerCase(all[i]);
+        if (endsWith(nm, ".ome.tif") || endsWith(nm, ".ome.tiff"))
+            files = Array.concat(files, all[i]);
+    }
+
+    total = files.length;
+    if (total==0) exit("No .ome.tif/.ome.tiff files found in:\n" + inDir);
+
+    // print header (ASCII only)
+    print("=== OME-TIFF per-channel Z-max to 8-bit ===");
+    print("Input dir : " + inDir);
+    print("Output dir: " + outDir);
+    print("Files to process: " + total);
+    print("ScaleConversions (16->8): " + scaleConversions);
+    print("------------------------------------------");
+
+    setBatchMode(true);
+
+    // process loop with progress
+    for (idx=0; idx<total; idx++) {
+        fname = files[idx];
+        fpath = inDir + fname;
+
+        // progress bar (0..1)
+        showProgress(idx, total);
+
+        // console: start
+        print("\n[" + (idx+1) + "/" + total + "] Starting: " + fname);
+        t0 = getTime();
+
+        // Parse IDs
+        sampleID = parseSampleID(fname);
+        sceneNum = parseSceneNumber(fname);
+        if (sampleID=="") sampleID = "UNKNOWN";
+        if (sceneNum < 0) sceneNum = 0;
+        sceneStr = zeroPad(sceneNum, 3);
+        outBase = sampleID + "_s" + sceneStr + ".tiff";
+        print("  Parsed -> sampleID: " + sampleID + " | scene: " + sceneStr + " | outBase: " + outBase);
+
+        // Import as hyperstack (XYCZT)
+        print("  Importing via Bio-Formats...");
+        run("Bio-Formats Importer", "open=["+fpath+"] autoscale color_mode=Default view=Hyperstack stack_order=XYCZT");
+        impTitle = getTitle();
+        if (!isOpenWindow(impTitle)) {
+            print("  [WARN] Failed to open image: " + fname + " -- skipping.");
+            continue;
+        }
+
+        // Split channels
+        print("  Splitting channels...");
+        run("Split Channels");
+
+        // Process each expected channel (no += to avoid parser quirks)
+        savedC1 = processOneChannelVerbose("C1-" + impTitle, outDir + File.separator + "C1_red",   outBase, "C1/red");
+        savedC2 = processOneChannelVerbose("C2-" + impTitle, outDir + File.separator + "C2_green", outBase, "C2/green");
+        savedC3 = processOneChannelVerbose("C3-" + impTitle, outDir + File.separator + "C3_blue",  outBase, "C3/blue");
+        savedCount = savedC1 + savedC2 + savedC3;
+
+        // Close original if open
+        if (isOpenWindow(impTitle)) { selectWindow(impTitle); close(); }
+
+        // cleanup + timing
+        call("java.lang.System.gc");
+        dt = (getTime() - t0) / 1000.0;
+
+        // percent complete
+        pct = d2s( ( (idx+1.0) / total ) * 100.0, 1 );
+        print("  Saved channels this file: " + savedCount + " | Elapsed: " + d2s(dt,2) + " s");
+        print("  Progress: " + pct + "% (" + (idx+1) + " of " + total + ")");
+    }
+
+    // finalize
+    showProgress(1,1);
+    setBatchMode(false);
+    print("\n=== Done. Processed " + total + " file(s). Output in: " + outDir + " ===");
+    showMessage("Done", "Finished processing " + total + " file(s).\nOutput in:\n" + outDir);
+}
+
+// ====================== helper routines ======================
+
+function makePerChannelDirs(base) {
+    File.makeDirectory(base + File.separator + "C1_red");
+    File.makeDirectory(base + File.separator + "C2_green");
+    File.makeDirectory(base + File.separator + "C3_blue");
+}
+
+function processOneChannelVerbose(winTitle, outDirChan, outBase, label) {
+    if (!isOpenWindow(winTitle)) {
+        print("    [WARN] Missing channel window: " + label + " (" + winTitle + ")");
+        return 0;
+    }
+    print("    Processing " + label + "...");
+    selectWindow(winTitle);
+
+    // Determine Z and project
+    getDimensions(w, h, ch, z, t);
+    if (z > 1) {
+        print("      Z=" + z + " -> Max Intensity Projection");
+        run("Z Project...", "start=1 stop="+z+" projection=[Max Intensity]");
+        // Close source stack for this channel
+        selectWindow(winTitle); close();
+        projTitle = getTitle(); // the new MAX_* window
+    } else {
+        projTitle = winTitle;
+        print("      Z=1 (no projection needed)");
+    }
+
+    // Convert to 8-bit and save
+    selectWindow(projTitle);
+    run("8-bit");
+    savePath = outDirChan + File.separator + outBase;
+    saveAs("Tiff", savePath);
+    print("      Saved: " + savePath);
+
+    // Close projection window
+    close();
+    return 1;
+}
+
+// --- parsing helpers (ImageJ built-ins only) ---
+
+function parseSampleID(fname) {
+    // Expect a token like 'M149' somewhere, typically first token
+    parts = split(fname, "-");
+    for (j=0; j<parts.length; j++) {
+        p = parts[j];
+        if (startsWith(p, "M") && isAllDigits(substring(p,1)))
+            return p;
+    }
+    return "";
+}
+
+function parseSceneNumber(fname) {
+    // Read digits immediately after "-Scene-" (case-insensitive), allow leading zeros
+    low = toLowerCase(fname);
+    key = "-scene-";
+    pos = indexOf(low, key);
+    if (pos < 0) return -1;
+    start = pos + lengthOf(key);
+    num = "";
+    for (kk = start; kk < lengthOf(low); kk++) {
+        ch = substring(low, kk, kk+1);
+        if (indexOf("0123456789", ch) >= 0) num = num + ch; else break;
+    }
+    if (lengthOf(num) == 0) return -1;
+    return parseInt(num); // handles leading zeros
+}
+
+function zeroPad(num, width) {
+    s = "" + num;
+    while (lengthOf(s) < width) s = "0" + s;
+    return s;
+}
+
+function isAllDigits(s) {
+    s = "" + s;
+    if (lengthOf(s) == 0) return false;
+    for (k = 0; k < lengthOf(s); k++) {
+        ch = substring(s, k, k+1);
+        if (indexOf("0123456789", ch) < 0) return false;
+    }
+    return true;
+}
+
+function isOpenWindow(title) {
+    titles = getList("image.titles");
+    for (ii=0; ii<titles.length; ii++) if (titles[ii]==title) return true;
+    return false;
+}
