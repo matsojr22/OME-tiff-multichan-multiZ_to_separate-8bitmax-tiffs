@@ -1,7 +1,7 @@
 // ImageJ/Fiji macro: OME-TIFF -> per-channel 8-bit Z-max projections (VERBOSE, FIXED v3)
 // Channels assumed fixed: C1=red, C2=green, C3=blue
 // Output names: M###_sSSS.tiff  (e.g., M149_s051.tiff)
-// Verbose console prints + % completion after each file. ASCII-only prints for parser compatibility.
+// Verbose console prints + % completion after each file.
 
 macro "OME-TIFF per-channel Z-max to 8-bit [F5]" {
 
@@ -31,8 +31,8 @@ macro "OME-TIFF per-channel Z-max to 8-bit [F5]" {
     total = files.length;
     if (total==0) exit("No .ome.tif/.ome.tiff files found in:\n" + inDir);
 
-    // print header (ASCII only)
-    print("=== OME-TIFF per-channel Z-max to 8-bit ===");
+    // print header (avoid unicode arrow)
+    print("=== OME-TIFF per-channel Z-max -> 8-bit ===");
     print("Input dir : " + inDir);
     print("Output dir: " + outDir);
     print("Files to process: " + total);
@@ -67,7 +67,7 @@ macro "OME-TIFF per-channel Z-max to 8-bit [F5]" {
         run("Bio-Formats Importer", "open=["+fpath+"] autoscale color_mode=Default view=Hyperstack stack_order=XYCZT");
         impTitle = getTitle();
         if (!isOpenWindow(impTitle)) {
-            print("  [WARN] Failed to open image: " + fname + " -- skipping.");
+            print("  [WARN] Failed to open image: " + fname + " — skipping.");
             continue;
         }
 
@@ -75,7 +75,7 @@ macro "OME-TIFF per-channel Z-max to 8-bit [F5]" {
         print("  Splitting channels...");
         run("Split Channels");
 
-        // Process each expected channel (no += to avoid parser quirks)
+        // Process each expected channel
         savedC1 = processOneChannelVerbose("C1-" + impTitle, outDir + File.separator + "C1_red",   outBase, "C1/red");
         savedC2 = processOneChannelVerbose("C2-" + impTitle, outDir + File.separator + "C2_green", outBase, "C2/green");
         savedC3 = processOneChannelVerbose("C3-" + impTitle, outDir + File.separator + "C3_blue",  outBase, "C3/blue");
@@ -124,7 +124,7 @@ function processOneChannelVerbose(winTitle, outDirChan, outBase, label) {
         run("Z Project...", "start=1 stop="+z+" projection=[Max Intensity]");
         // Close source stack for this channel
         selectWindow(winTitle); close();
-        projTitle = getTitle(); // the new MAX_* window
+        projTitle = getTitle();
     } else {
         projTitle = winTitle;
         print("      Z=1 (no projection needed)");
@@ -142,33 +142,84 @@ function processOneChannelVerbose(winTitle, outDirChan, outBase, label) {
     return 1;
 }
 
-// --- parsing helpers (ImageJ built-ins only) ---
-
 function parseSampleID(fname) {
-    // Expect a token like 'M149' somewhere, typically first token
-    parts = split(fname, "-");
-    for (j=0; j<parts.length; j++) {
-        p = parts[j];
-        if (startsWith(p, "M") && isAllDigits(substring(p,1)))
-            return p;
+    // Robust scan: find the first occurrence of 'M' or 'm' followed by >=1 digits anywhere in the name.
+    s = fname;
+    n = lengthOf(s);
+    for (i = 0; i < n - 1; i++) {
+        ch = substring(s, i, i+1);
+        if (ch=="M" || ch=="m") {
+            // collect consecutive digits after M/m
+            j = i + 1;
+            digits = "";
+            while (j < n) {
+                dch = substring(s, j, j+1);
+                if (indexOf("0123456789", dch) >= 0) { digits = digits + dch; j++; }
+                else break;
+            }
+            if (lengthOf(digits) > 0) return "M" + digits; // normalize to uppercase M
+        }
     }
+    // As a fallback, try dash-separated tokens like before (covers cases like "M149-Rotate ...")
+    parts = split(fname, "-");
+    for (k=0; k<parts.length; k++) {
+        p = parts[k];
+        if (startsWith(p, "M") && isAllDigits(substring(p,1))) return p;
+        if (startsWith(p, "m") && isAllDigits(substring(p,1))) return "M" + substring(p,1);
+    }
+    return "";
+}
     return "";
 }
 
 function parseSceneNumber(fname) {
-    // Read digits immediately after "-Scene-" (case-insensitive), allow leading zeros
-    low = toLowerCase(fname);
-    key = "-scene-";
-    pos = indexOf(low, key);
-    if (pos < 0) return -1;
-    start = pos + lengthOf(key);
-    num = "";
-    for (kk = start; kk < lengthOf(low); kk++) {
-        ch = substring(low, kk, kk+1);
-        if (indexOf("0123456789", ch) >= 0) num = num + ch; else break;
+    // Flexible parser: finds digits following 'scene' with -, _, or space delimiters.
+    // Handles 'Scene-33', 'SCENE 033', 'scene_12', etc. Returns integer (leading zeros ok).
+    s = normalizeAscii(toLowerCase(fname));
+    n = lengthOf(s);
+    best = -1; // fallback if multiple; we'll take the first valid occurrence
+    for (i = 0; i <= n - 5; i++) {
+        if (substring(s, i, i+5) == "scene") {
+            k = i + 5;
+            // skip common separators
+            while (k < n) {
+                ch = substring(s, k, k+1);
+                if (ch == " " || ch == "-" || ch == "_") k++; else break;
+            }
+            // collect digits
+            digits = "";
+            while (k < n) {
+                ch = substring(s, k, k+1);
+                if (indexOf("0123456789", ch) >= 0) { digits = digits + ch; k++; }
+                else break;
+            }
+            if (lengthOf(digits) > 0) {
+                val = parseInt(digits);
+                // return first match; if you prefer the largest match, compare and keep max
+                return val;
+            }
+            // else continue scanning for next 'scene'
+        }
     }
+    return -1;
+}
+
+function normalizeAscii(s) {
+    // Replace common Unicode hyphens and NBSP with ASCII equivalents to make parsing robust.
+    out = "";
+    for (ii = 0; ii < lengthOf(s); ii++) {
+        ch = substring(s, ii, ii+1);
+        code = ch.charCodeAt(0);
+        // en dash (8211), em dash (8212), figure dash (8210), minus (8722)
+        if (code==8211 || code==8212 || code==8210 || code==8722) out = out + "-";
+        // NBSP (160) -> space
+        else if (code==160) out = out + " ";
+        else out = out + ch;
+    }
+    return out;
+}
     if (lengthOf(num) == 0) return -1;
-    return parseInt(num); // handles leading zeros
+    return parseInt(num);
 }
 
 function zeroPad(num, width) {
